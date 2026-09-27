@@ -2954,6 +2954,8 @@ is_os_window_potentially_visible(OSWindow *w) {
 
 bool
 should_os_window_be_rendered(OSWindow *w) {
+    // MAGPIE frame capture renders covered windows too (see child-monitor.c).
+    if (magpie_capture_enabled()) return true;
     return is_os_window_potentially_visible(w) && glfwAreSwapsAllowed(w->handle);
 }
 

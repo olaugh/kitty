@@ -16,6 +16,8 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <signal.h>
@@ -1021,6 +1023,90 @@ thumbnail_callback(OSWindow *os_window) {
 #undef tc
 }
 
+// MAGPIE frame capture (for recording PR videos): when the environment
+// variable KITTY_MAGPIE_FRAME_DIR names a directory, every rendered frame is
+// read back while <dir>/recording exists and written to <dir>/clip_NN/ as
+// f_NNNNNN.rgba (RGBA, top-down rows), with "NNNNNN <CLOCK_MONOTONIC seconds>"
+// appended to times.txt and the frame size in size.txt. Each time recording
+// starts a new clip directory is used. KITTY_MAGPIE_FRAME_SCALE (default 1)
+// scales frames on the GPU before read back.
+static struct {
+    bool checked, enabled, recording;
+    char dir[4096];
+    double scale;
+    int clip;
+    unsigned frame;
+    FILE *times;
+    unsigned char *buf;
+    size_t buf_size;
+} magpie_capture;
+
+bool
+magpie_capture_enabled(void) {
+    if (!magpie_capture.checked) {
+        magpie_capture.checked = true;
+        const char *dir = getenv("KITTY_MAGPIE_FRAME_DIR");
+        if (dir && dir[0]) {
+            magpie_capture.enabled = true;
+            snprintf(magpie_capture.dir, sizeof(magpie_capture.dir), "%s", dir);
+            const char *scale = getenv("KITTY_MAGPIE_FRAME_SCALE");
+            magpie_capture.scale = scale ? atof(scale) : 1.0;
+            if (magpie_capture.scale <= 0 || magpie_capture.scale > 1) magpie_capture.scale = 1.0;
+        }
+    }
+    return magpie_capture.enabled;
+}
+
+static void
+magpie_capture_frame(OSWindow *os_window) {
+    if (!magpie_capture_enabled()) return;
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/recording", magpie_capture.dir);
+    const bool want = access(path, F_OK) == 0;
+    if (!want) {
+        if (magpie_capture.recording) {
+            if (magpie_capture.times) fclose(magpie_capture.times);
+            magpie_capture.times = NULL;
+            magpie_capture.recording = false;
+        }
+        return;
+    }
+    const unsigned vw = os_window->viewport_width, vh = os_window->viewport_height;
+    unsigned w = (unsigned)(vw * magpie_capture.scale), h = (unsigned)(vh * magpie_capture.scale);
+    if (!magpie_capture.recording) {
+        magpie_capture.recording = true;
+        magpie_capture.clip++;
+        magpie_capture.frame = 0;
+        snprintf(path, sizeof(path), "%s/clip_%02d", magpie_capture.dir, magpie_capture.clip);
+        mkdir(path, 0755);
+        snprintf(path, sizeof(path), "%s/clip_%02d/times.txt", magpie_capture.dir, magpie_capture.clip);
+        magpie_capture.times = fopen(path, "w");
+    }
+    const size_t need = (size_t)4 * w * h;
+    if (need > magpie_capture.buf_size) {
+        free(magpie_capture.buf);
+        magpie_capture.buf = malloc(need);
+        magpie_capture.buf_size = magpie_capture.buf ? need : 0;
+        if (!magpie_capture.buf) return;
+    }
+    Region region = {.left = 0, .top = 0, .right = vw, .bottom = vh};
+    take_screenshot_of_rectangular_region(os_window, region, magpie_capture.buf, &w, &h, false);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const unsigned n = magpie_capture.frame++;
+    snprintf(path, sizeof(path), "%s/clip_%02d/f_%06u.rgba", magpie_capture.dir, magpie_capture.clip, n);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(magpie_capture.buf, 1, (size_t)4 * w * h, f);
+    fclose(f);
+    snprintf(path, sizeof(path), "%s/clip_%02d/size.txt", magpie_capture.dir, magpie_capture.clip);
+    if ((f = fopen(path, "w"))) { fprintf(f, "%u %u\n", w, h); fclose(f); }
+    if (magpie_capture.times) {
+        fprintf(magpie_capture.times, "%06u %.6f\n", n, (double)ts.tv_sec + (double)ts.tv_nsec / 1e9);
+        fflush(magpie_capture.times);
+    }
+}
+
 static void
 render_prepared_os_window(
     OSWindow *os_window,
@@ -1058,6 +1144,7 @@ render_prepared_os_window(
         thumbnail_callback(os_window);
         global_state.thumbnail_callback.os_window = 0;
     }
+    magpie_capture_frame(os_window);
     swap_window_buffers(os_window);
     os_window->last_active_tab = os_window->active_tab;
     os_window->last_num_tabs = os_window->num_tabs;

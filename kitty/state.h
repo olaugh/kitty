@@ -701,6 +701,7 @@ void update_os_window_references(void);
 void mark_os_window_for_close(OSWindow *w, CloseRequest cr);
 void update_os_window_viewport(OSWindow *window, bool notify_boss);
 bool should_os_window_be_rendered(OSWindow *w);
+bool magpie_capture_enabled(void);
 bool is_os_window_potentially_visible(OSWindow *w);
 void update_os_window_visibility_reports(OSWindow *w);
 void wakeup_main_loop(void);
